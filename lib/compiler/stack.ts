@@ -1,7 +1,10 @@
-"use strict";
-
 /** Utility class that helps generating code for C-like languages. */
-class Stack {
+export class Stack {
+  /** Last used variable in the stack. */
+  private sp       = -1;
+  /** Maximum stack size. */
+  private maxSp    = -1;
+
   /**
    * Constructs the helper for tracking variable slots of the stack virtual machine
    *
@@ -10,16 +13,12 @@ class Stack {
    * @param {string} type The type of the variables. For JavaScript there are `var` or `let`
    * @param {number[]} bytecode Bytecode for error messages
    */
-  constructor(ruleName, varName, type, bytecode) {
-    /** Last used variable in the stack. */
-    this.sp       = -1;
-    /** Maximum stack size. */
-    this.maxSp    = -1;
-    this.varName  = varName;
-    this.ruleName = ruleName;
-    this.type     = type;
-    this.bytecode = bytecode;
-  }
+  constructor(
+    private ruleName: string,
+    private varName: string,
+    private type: string,
+    private bytecode: number[],
+  ) {}
 
   /**
    * Returns name of the variable at the index `i`.
@@ -29,7 +28,7 @@ class Stack {
    *
    * @throws {RangeError} If `i < 0`, which means a stack underflow (there are more `pop`s than `push`es)
    */
-  name(i) {
+  name(i: number) {
     if (i < 0) {
       throw new RangeError(
         `Rule '${this.ruleName}': The variable stack underflow: attempt to use a variable '${this.varName}<x>' at an index ${i}.\nBytecode: ${this.bytecode}`
@@ -46,7 +45,7 @@ class Stack {
    * @param {string} exprCode Any expression code that must be assigned to the new variable in the stack
    * @return {string} Assignment code
    */
-  push(exprCode) {
+  push(exprCode: string) {
     const code = this.name(++this.sp) + " = " + exprCode + ";";
 
     if (this.sp > this.maxSp) { this.maxSp = this.sp; }
@@ -62,7 +61,9 @@ class Stack {
    *
    * @throws {RangeError} If the stack underflow (there are more `pop`s than `push`es)
    */
-  pop(n) {
+  pop(): string;
+  pop(n: number): string[];
+  pop(n?: number) {
     if (n !== undefined) {
       this.sp -= n;
 
@@ -89,7 +90,7 @@ class Stack {
    *
    * @throws {RangeError} If `i < 0` or more than the stack size
    */
-  index(i) {
+  index(i: number) {
     if (i < 0) {
       throw new RangeError(
         `Rule '${this.ruleName}': The variable stack overflow: attempt to get a variable at a negative index ${i}.\nBytecode: ${this.bytecode}`
@@ -141,7 +142,7 @@ class Stack {
    * @throws {Error} If `generateElse` is defined and the stack pointer moved differently in the
    *         `generateIf` and `generateElse`
    */
-  checkedIf(pos, generateIf, generateElse) {
+  checkedIf(pos: number, generateIf: () => void, generateElse?: () => void) {
     const baseSp = this.sp;
 
     generateIf();
@@ -172,7 +173,7 @@ class Stack {
    *
    * @throws {Error} If `generateBody` move the stack pointer (if it contains unbalanced `push`es and `pop`s)
    */
-  checkedLoop(pos, generateBody) {
+  checkedLoop(pos: number, generateBody: () => void) {
     const baseSp = this.sp;
 
     generateBody();
@@ -187,5 +188,3 @@ class Stack {
     }
   }
 }
-
-module.exports = Stack;

@@ -1,14 +1,13 @@
-"use strict";
-
-const asts = require("../asts");
-const visitor = require("../visitor");
+import { alwaysConsumesOnSuccess } from "../asts";
+import { buildVisitor } from "../visitor";
+import type { Pass } from "./pass";
 
 // Reports expressions that don't consume any input inside |*| or |+| in the
 // grammar, which prevents infinite loops in the generated parser.
-function reportInfiniteRepetition(ast, options, session) {
-  const check = visitor.build({
+export const reportInfiniteRepetition: Pass = (ast, options, session) => {
+  const check = buildVisitor({
     zero_or_more(node) {
-      if (!asts.alwaysConsumesOnSuccess(ast, node.expression)) {
+      if (!alwaysConsumesOnSuccess(ast, node.expression)) {
         session.error(
           "Possible infinite loop when parsing (repetition used with an expression that may not consume any input)",
           node.location
@@ -17,7 +16,7 @@ function reportInfiniteRepetition(ast, options, session) {
     },
 
     one_or_more(node) {
-      if (!asts.alwaysConsumesOnSuccess(ast, node.expression)) {
+      if (!alwaysConsumesOnSuccess(ast, node.expression)) {
         session.error(
           "Possible infinite loop when parsing (repetition used with an expression that may not consume any input)",
           node.location
@@ -28,5 +27,3 @@ function reportInfiniteRepetition(ast, options, session) {
 
   check(ast);
 }
-
-module.exports = reportInfiniteRepetition;

@@ -1,29 +1,25 @@
-"use strict";
-
-const visitor      = require("../visitor");
-const asts         = require("../asts");
-const GrammarError = require("../../grammar-error");
-
-const ALWAYS_MATCH = 1;
-const SOMETIMES_MATCH = 0;
-const NEVER_MATCH = -1;
+import { buildExprVisitor, buildVisitor } from "../visitor";
+import { findRule } from "../asts";
+import { GrammarError } from "../../grammar-error";
+import type { Pass } from "./pass";
+import * as a from "../../parser";
+import { MatchResult } from "../../parser";
 
 // Inference match result of the each node. Can be:
 // -1: negative result, matching of that node always fails
 //  0: neutral result, may be fail, may be match
 //  1: positive result, always match
-function inferenceMatchResult(ast) {
-  function sometimesMatch(node) { return (node.match = SOMETIMES_MATCH); }
-  function alwaysMatch(node) {
+export const inferenceMatchResult: Pass = (ast) => {
+  const sometimesMatch = (
+    node: Exclude<a.AnyNode, a.Grammar | a.TopLevelInitializer | a.Initializer>
+  ) => (node.match = MatchResult.SOMETIMES);
+  const alwaysMatch = (node: a.Expressions[keyof a.Expressions]) => {
     inference(node.expression);
 
-    return (node.match = ALWAYS_MATCH);
+    return (node.match = MatchResult.ALWAYS);
   }
-
-  function inferenceExpression(node) {
-    return (node.match = inference(node.expression));
-  }
-  function inferenceElements(elements, forChoice) {
+  const inferenceExpression = (node: a.Expressions[keyof a.Expressions]) => (node.match = inference(node.expression));
+  const inferenceElements = (elements: (a.Alternative | a.Element)[], forChoice: boolean) => {
     const length = elements.length;
     let always = 0;
     let never = 0;
@@ -31,28 +27,33 @@ function inferenceMatchResult(ast) {
     for (let i = 0; i < length; ++i) {
       const result = inference(elements[i]);
 
-      if (result === ALWAYS_MATCH) { ++always; }
-      if (result === NEVER_MATCH)  { ++never;  }
+      if (result === MatchResult.ALWAYS) { ++always; }
+      if (result === MatchResult.NEVER)  { ++never;  }
     }
 
     if (always === length) {
-      return ALWAYS_MATCH;
+      return MatchResult.ALWAYS;
     }
     if (forChoice) {
-      return never === length ? NEVER_MATCH : SOMETIMES_MATCH;
+      return never === length ? MatchResult.NEVER : MatchResult.SOMETIMES;
     }
 
-    return never > 0 ? NEVER_MATCH : SOMETIMES_MATCH;
+    return never > 0 ? MatchResult.NEVER : MatchResult.SOMETIMES;
   }
 
-  const inference = visitor.build({
+  const ignoreNode = () => MatchResult.NEVER;
+
+  const inference: a.Visitor<[], MatchResult> = buildExprVisitor({
+    grammar: ignoreNode,
+    initializer: ignoreNode,
+    top_level_initializer: ignoreNode,
     rule(node) {
       let oldResult;
       let count = 0;
 
       // If property not yet calculated, do that
       if (typeof node.match === "undefined") {
-        node.match = SOMETIMES_MATCH;
+        node.match = MatchResult.SOMETIMES;
         do {
           oldResult = node.match;
           node.match = inference(node.expression);
@@ -100,19 +101,23 @@ function inferenceMatchResult(ast) {
     semantic_and: sometimesMatch,
     semantic_not: sometimesMatch,
     rule_ref(node) {
-      const rule = asts.findRule(ast, node.name);
+      const rule = findRule(ast, node.name);
 
-      return (node.match = inference(rule));
+      if (rule) {
+        return (node.match = inference(rule));
+      } else {
+        return MatchResult.SOMETIMES;
+      }
     },
     literal(node) {
       // Empty literal always match on any input
-      const match = node.value.length === 0 ? ALWAYS_MATCH : SOMETIMES_MATCH;
+      const match = node.value.length === 0 ? MatchResult.ALWAYS : MatchResult.SOMETIMES;
 
       return (node.match = match);
     },
     class(node) {
       // Empty character class never match on any input
-      const match = node.parts.length === 0 ? NEVER_MATCH : SOMETIMES_MATCH;
+      const match = node.parts.length === 0 ? MatchResult.NEVER : MatchResult.SOMETIMES;
 
       return (node.match = match);
     },
@@ -122,9 +127,3 @@ function inferenceMatchResult(ast) {
 
   inference(ast);
 }
-
-inferenceMatchResult.ALWAYS_MATCH    = ALWAYS_MATCH;
-inferenceMatchResult.SOMETIMES_MATCH = SOMETIMES_MATCH;
-inferenceMatchResult.NEVER_MATCH     = NEVER_MATCH;
-
-module.exports = inferenceMatchResult;

@@ -1,13 +1,13 @@
-"use strict";
-
-const visitor = require("../visitor");
+import { LocationRange } from "../../parser";
+import { buildVisitor } from "../visitor";
+import type { Pass } from "./pass";
 
 // Checks that each rule is defined only once.
-function reportDuplicateRules(ast, options, session) {
-  const rules = {};
+export const reportDuplicateRules: Pass = (ast, options, session) => {
+  const rules: Record<string, LocationRange> = {};
 
-  const check = visitor.build({
-    rule(node) {
+  const check = buildVisitor({
+    rule: node => {
       if (Object.prototype.hasOwnProperty.call(rules, node.name)) {
         session.error(
           `Rule "${node.name}" is already defined`,
@@ -17,16 +17,11 @@ function reportDuplicateRules(ast, options, session) {
             location: rules[node.name],
           }]
         );
-
-        // Do not rewrite original rule location
-        return;
+      } else {
+        rules[node.name] = node.nameLocation;
       }
-
-      rules[node.name] = node.nameLocation;
     },
   });
 
   check(ast);
 }
-
-module.exports = reportDuplicateRules;

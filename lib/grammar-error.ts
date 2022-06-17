@@ -1,15 +1,16 @@
-"use strict";
+import type { Stage } from './compiler/passes/pass';
+import type { LocationRange } from './parser';
 
 // See: https://github.com/Microsoft/TypeScript-wiki/blob/master/Breaking-Changes.md#extending-built-ins-like-error-array-and-map-may-no-longer-work
 // This is roughly what typescript generates, it's not called after super(), where it's needed.
 // istanbul ignore next This is a special black magic that cannot be covered everywhere
 const setProtoOf = Object.setPrototypeOf
   || ({ __proto__: [] } instanceof Array
-      && function(d, b) {
+      && function(d: any, b: any) {
         // eslint-disable-next-line no-proto
         d.__proto__ = b;
       })
-  || function(d, b) {
+  || function(d: any, b: any) {
     for (const p in b) {
       if (Object.prototype.hasOwnProperty.call(b, p)) {
         d[p] = b[p];
@@ -17,18 +18,55 @@ const setProtoOf = Object.setPrototypeOf
     }
   };
 
+export interface DiagnosticNote {
+  message: string;
+  location: LocationRange;
+}
+
+/** Severity level of problems that can be registered in compilation session. */
+export type Severity = "error" | "warning" | "info";
+
+export type Problem = [
+  /** Problem severity. */
+  Severity,
+  /** Diagnostic message. */
+  string,
+  /** Location where message is generated, if applicable. */
+  LocationRange?,
+  /** List of additional messages with their locations, if applicable. */
+  DiagnosticNote[]?,
+];
+
+/**
+ * The entry that maps object in the `source` property of error locations
+ * to the actual source text of a grammar. That entries is necessary for
+ * formatting errors.
+ */
+export interface SourceText {
+  /**
+   * Identifier of a grammar that stored in the `location().source` property
+   * of error and diagnostic messages.
+   *
+   * This one should be the same object that used in the `location().source`,
+   * because their compared using `===`.
+   */
+  source: any;
+  /** Source text of a grammar. */
+  text: string;
+}
+
 // Thrown when the grammar contains an error.
-/** @type {import("./peg").GrammarError} */
-class GrammarError extends Error {
-  constructor(message, location, diagnostics) {
+export class GrammarError extends Error {
+  public stage: Stage | null;
+  public problems: Problem[];
+  constructor(
+    public message: string,
+    public readonly location?: LocationRange,
+    public readonly diagnostics: DiagnosticNote[] = []
+  ) {
     super(message);
     setProtoOf(this, GrammarError.prototype);
     this.name = "GrammarError";
-    this.location = location;
-    if (diagnostics === undefined) {
-      diagnostics = [];
-    }
-    this.diagnostics = diagnostics;
     // All problems if this error is thrown by the plugin and not at stage
     // checking phase
     this.stage = null;
@@ -80,7 +118,7 @@ class GrammarError extends Error {
    *
    * @returns {string} the formatted error
    */
-  format(sources) {
+  format(sources: SourceText[]) {
     const srcLines = sources.map(({ source, text }) => ({
       source,
       text: text.split(/\r\n|\n|\r/g),
@@ -94,7 +132,7 @@ class GrammarError extends Error {
      * @param {string} message Additional message that will be shown after location
      * @returns {string}
      */
-    function entry(location, indent, message = "") {
+    function entry(location: LocationRange, indent: number, message: string = "") {
       let str = "";
       const src = srcLines.find(({ source }) => source === location.source);
       const s = location.start;
@@ -123,14 +161,13 @@ ${"".padEnd(indent)} | ${"".padEnd(s.column - 1)}${"".padEnd(hatLen, "^")}`;
 
     /**
      * Returns a formatted representation of the one problem in the error.
-     *
-     * @param {import("./peg").Severity} severity Importance of the message
-     * @param {string} message Test message of the problem
-     * @param {import("./peg").LocationRange?} location Location of the problem in the source
-     * @param {import("./peg").DiagnosticNote[]} diagnostics Additional notes about the problem
-     * @returns {string}
      */
-    function formatProblem(severity, message, location, diagnostics = []) {
+    function formatProblem(
+      severity: Severity,
+      message: string,
+      location?: LocationRange,
+      diagnostics: DiagnosticNote[] = []
+    ) {
       // Calculate maximum width of all lines
       let maxLine;
       if (location) {
@@ -164,5 +201,3 @@ ${"".padEnd(indent)} | ${"".padEnd(s.column - 1)}${"".padEnd(hatLen, "^")}`;
       .map(p => formatProblem(...p)).join("\n\n");
   }
 }
-
-module.exports = GrammarError;

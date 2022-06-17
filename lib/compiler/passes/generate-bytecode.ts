@@ -1,10 +1,8 @@
-"use strict";
-
-const asts = require("../asts");
-const op = require("../opcodes");
-const visitor = require("../visitor");
-const { ALWAYS_MATCH, SOMETIMES_MATCH, NEVER_MATCH } = require("./inference-match-result");
-
+import { Action, Alternative, bytecodeDone, CharacterClass, Element, MatchResult, Primary, SemanticPredicate, Suffixed, Visitor } from "../../parser";
+import { indexOfRule } from "../asts";
+import { Bytecode, opcodes as op } from "../opcodes";
+import { buildExprVisitor, buildVisitor } from "../visitor";
+import type { Pass } from './pass';
 // Generates bytecode.
 //
 // Instructions
@@ -217,20 +215,32 @@ const { ALWAYS_MATCH, SOMETIMES_MATCH, NEVER_MATCH } = require("./inference-matc
 // that is equivalent of an unknown match result and signals the generator that
 // runtime check for the |FAILED| is required. Trick is explained on the
 // Wikipedia page (https://en.wikipedia.org/wiki/Asm.js#Code_generation)
-function generateBytecode(ast) {
-  const literals = [];
-  const classes = [];
-  const expectations = [];
-  const functions = [];
 
-  function addLiteralConst(value) {
+interface Context {
+  // Stack pointer
+  sp: number;
+  // Mapping of label names to stack positions
+  env: Record<string, number>;
+  // Fields that have been picked
+  pluck?: number[];
+  // Action nodes pass themselves to children here
+  action: Action | null;
+}
+
+export const generateBytecode: Pass = (ast) => {
+  const literals: string[] = [];
+  const classes: bytecodeDone.CharClassDesc[] = [];
+  const expectations: bytecodeDone.ExpectedConst[] = [];
+  const functions: bytecodeDone.FunctionDesc[] = [];
+
+  const addLiteralConst = (value: string): number => {
     const index = literals.indexOf(value);
 
     return index === -1 ? literals.push(value) - 1 : index;
-  }
+  };
 
-  function addClassConst(node) {
-    const cls = {
+  const addClassConst = (node: CharacterClass): number => {
+    const cls: bytecodeDone.CharClassDesc = {
       value: node.parts,
       inverted: node.inverted,
       ignoreCase: node.ignoreCase,
@@ -239,17 +249,17 @@ function generateBytecode(ast) {
     const index = classes.findIndex(c => JSON.stringify(c) === pattern);
 
     return index === -1 ? classes.push(cls) - 1 : index;
-  }
+  };
 
-  function addExpectedConst(expected) {
+  const addExpectedConst = (expected: bytecodeDone.ExpectedConst): number => {
     const pattern = JSON.stringify(expected);
     const index = expectations.findIndex(e => JSON.stringify(e) === pattern);
 
     return index === -1 ? expectations.push(expected) - 1 : index;
-  }
+  };
 
-  function addFunctionConst(predicate, params, node) {
-    const func = {
+  const addFunctionConst = (predicate: boolean, params: string[], node: Action | SemanticPredicate): number => {
+    const func: bytecodeDone.FunctionDesc = {
       predicate,
       params,
       body: node.code,
@@ -261,23 +271,11 @@ function generateBytecode(ast) {
     return index === -1 ? functions.push(func) - 1 : index;
   }
 
-  function cloneEnv(env) {
-    const clone = {};
+  const buildSequence = (first: Bytecode, ...args: Bytecode[]) => first.concat(...args);
 
-    Object.keys(env).forEach(name => {
-      clone[name] = env[name];
-    });
-
-    return clone;
-  }
-
-  function buildSequence(first, ...args) {
-    return first.concat(...args);
-  }
-
-  function buildCondition(match, condCode, thenCode, elseCode) {
-    if (match === ALWAYS_MATCH) { return thenCode; }
-    if (match === NEVER_MATCH)  { return elseCode; }
+  const buildCondition = (match: MatchResult, condCode: Bytecode, thenCode: Bytecode, elseCode: Bytecode) => {
+    if (match === MatchResult.ALWAYS) { return thenCode; }
+    if (match === MatchResult.NEVER)  { return elseCode; }
 
     return condCode.concat(
       [thenCode.length, elseCode.length],
@@ -286,25 +284,23 @@ function generateBytecode(ast) {
     );
   }
 
-  function buildLoop(condCode, bodyCode) {
-    return condCode.concat([bodyCode.length], bodyCode);
-  }
+  const buildLoop = (condCode: Bytecode, bodyCode: Bytecode): Bytecode => condCode.concat([bodyCode.length], bodyCode);
 
-  function buildCall(functionIndex, delta, env, sp) {
+  const buildCall = (functionIndex: number, delta: number, env: Record<string, number>, sp: number): Bytecode => {
     const params = Object.keys(env).map(name => sp - env[name]);
 
     return [op.CALL, functionIndex, delta, params.length].concat(params);
   }
 
-  function buildSimplePredicate(expression, negative, context) {
-    const match = expression.match | 0;
+  const buildSimplePredicate = (expression: Suffixed | Primary, negative: boolean, context: Context): Bytecode => {
+    const match = expression.match || MatchResult.SOMETIMES;
 
     return buildSequence(
       [op.PUSH_CURR_POS],
       [op.SILENT_FAILS_ON],
       generate(expression, {
         sp: context.sp + 1,
-        env: cloneEnv(context.env),
+        env: {...context.env},
         action: null,
       }),
       [op.SILENT_FAILS_OFF],
@@ -325,7 +321,7 @@ function generateBytecode(ast) {
     );
   }
 
-  function buildSemanticPredicate(node, negative, context) {
+  const buildSemanticPredicate = (node: SemanticPredicate, negative: boolean, context: Context): Bytecode => {
     const functionIndex = addFunctionConst(
       true, Object.keys(context.env), node
     );
@@ -334,7 +330,7 @@ function generateBytecode(ast) {
       [op.UPDATE_SAVED_POS],
       buildCall(functionIndex, 0, context.env, context.sp),
       buildCondition(
-        node.match | 0,
+        node.match || MatchResult.SOMETIMES,
         [op.IF],
         buildSequence(
           [op.POP],
@@ -348,36 +344,40 @@ function generateBytecode(ast) {
     );
   }
 
-  function buildAppendLoop(expressionCode) {
-    return buildLoop(
-      [op.WHILE_NOT_ERROR],
-      buildSequence([op.APPEND], expressionCode)
-    );
-  }
+  const buildAppendLoop = (expressionCode: Bytecode) => buildLoop(
+    [op.WHILE_NOT_ERROR],
+    buildSequence([op.APPEND], expressionCode)
+  );
 
-  const generate = visitor.build({
+  const generate: Visitor<[Context | null], Bytecode> = buildExprVisitor<[Context | null], Bytecode>({
     grammar(node) {
-      node.rules.forEach(generate);
+      node.rules.forEach(rule => generate(rule, null));
 
       node.literals = literals;
       node.classes = classes;
       node.expectations = expectations;
       node.functions = functions;
+      return [];
     },
+
+    top_level_initializer: () => [],
+    initializer: () => [],
 
     rule(node) {
       node.bytecode = generate(node.expression, {
-        sp: -1,        // Stack pointer
-        env: {},       // Mapping of label names to stack positions
-        pluck: [],     // Fields that have been picked
-        action: null,  // Action nodes pass themselves to children here
+        sp: -1,
+        env: {},
+        pluck: [],
+        action: null,
       });
+
+      return [];
     },
 
     named(node, context) {
-      const match = node.match | 0;
+      const match = node.match || MatchResult.SOMETIMES;
       // Expectation not required if node always fail
-      const nameIndex = (match === NEVER_MATCH)
+      const nameIndex = (match === MatchResult.NEVER)
         ? null
         : addExpectedConst({ type: "rule", value: node.name });
 
@@ -394,17 +394,17 @@ function generateBytecode(ast) {
     },
 
     choice(node, context) {
-      function buildAlternativesCode(alternatives, context) {
-        const match = alternatives[0].match | 0;
+      const buildAlternativesCode = (alternatives: Alternative[], context: Context): Bytecode => {
+        const match = alternatives[0].match || MatchResult.SOMETIMES;
         const first = generate(alternatives[0], {
           sp: context.sp,
-          env: cloneEnv(context.env),
+          env: {...context.env},
           action: null,
         });
         // If an alternative always match, no need to generate code for the next
         // alternatives. Because their will never tried to match, any side-effects
         // from next alternatives is impossible so we can skip their generation
-        if (match === ALWAYS_MATCH) {
+        if (match === MatchResult.ALWAYS) {
           return first;
         }
 
@@ -416,7 +416,7 @@ function generateBytecode(ast) {
           first,
           alternatives.length > 1
             ? buildCondition(
-              SOMETIMES_MATCH,
+              MatchResult.SOMETIMES,
               [op.IF_ERROR],
               buildSequence(
                 [op.POP],
@@ -428,11 +428,19 @@ function generateBytecode(ast) {
         );
       }
 
+      if (!context) {
+        throw new Error('Impossible');
+      }
+
       return buildAlternativesCode(node.alternatives, context);
     },
 
     action(node, context) {
-      const env = cloneEnv(context.env);
+      if (!context) {
+        throw new Error('Impossible');
+      }
+
+      const env = {...context.env};
       const emitCall = node.expression.type !== "sequence"
                     || node.expression.elements.length === 0;
       const expressionCode = generate(node.expression, {
@@ -440,9 +448,9 @@ function generateBytecode(ast) {
         env,
         action: node,
       });
-      const match = node.expression.match | 0;
+      const match = node.expression.match || MatchResult.SOMETIMES;
       // Function only required if expression can match
-      const functionIndex = emitCall && match !== NEVER_MATCH
+      const functionIndex = emitCall && match !== MatchResult.NEVER
         ? addFunctionConst(false, Object.keys(env), node)
         : null;
 
@@ -465,7 +473,11 @@ function generateBytecode(ast) {
     },
 
     sequence(node, context) {
-      function buildElementsCode(elements, context) {
+      if (!context) {
+        throw new Error('Impossible');
+      }
+
+      const buildElementsCode = (elements: Element[], context: Context): Bytecode => {
         if (elements.length > 0) {
           const processedCount = node.elements.length - elements.length + 1;
 
@@ -477,7 +489,7 @@ function generateBytecode(ast) {
               action: null,
             }),
             buildCondition(
-              elements[0].match | 0,
+              elements[0].match || MatchResult.SOMETIMES,
               [op.IF_NOT_ERROR],
               buildElementsCode(elements.slice(1), {
                 sp: context.sp + 1,
@@ -493,7 +505,7 @@ function generateBytecode(ast) {
             )
           );
         } else {
-          if (context.pluck.length > 0) {
+          if (context.pluck && context.pluck.length > 0) {
             return buildSequence(
               [op.PLUCK, node.elements.length + 1, context.pluck.length],
               context.pluck.map(eSP => context.sp - eSP)
@@ -534,16 +546,23 @@ function generateBytecode(ast) {
     },
 
     labeled(node, context) {
+      if (!context) {
+        throw new Error('Impossible');
+      }
+
       let env = context.env;
       const label = node.label;
       const sp = context.sp + 1;
 
       if (label) {
-        env = cloneEnv(context.env);
-        context.env[node.label] = sp;
+        env = {...context.env};
+        context.env[label] = sp;
       }
 
       if (node.pick) {
+        if (!context.pluck) {
+          throw new Error('Impossible');
+        }
         context.pluck.push(sp);
       }
 
@@ -555,15 +574,19 @@ function generateBytecode(ast) {
     },
 
     text(node, context) {
+      if (!context) {
+        throw new Error('Impossible');
+      }
+
       return buildSequence(
         [op.PUSH_CURR_POS],
         generate(node.expression, {
           sp: context.sp + 1,
-          env: cloneEnv(context.env),
+          env: {...context.env},
           action: null,
         }),
         buildCondition(
-          node.match | 0,
+          node.match || MatchResult.SOMETIMES,
           [op.IF_NOT_ERROR],
           buildSequence([op.POP], [op.TEXT]),
           [op.NIP]
@@ -580,17 +603,21 @@ function generateBytecode(ast) {
     },
 
     optional(node, context) {
+      if (!context) {
+        throw new Error('Impossible');
+      }
+
       return buildSequence(
         generate(node.expression, {
           sp: context.sp,
-          env: cloneEnv(context.env),
+          env: {...context.env},
           action: null,
         }),
         buildCondition(
           // Check expression match, not the node match
           // If expression always match, no need to replace FAILED to NULL,
           // because FAILED will never appeared
-          -(node.expression.match | 0),
+          -(node.expression.match || MatchResult.SOMETIMES),
           [op.IF_ERROR],
           buildSequence([op.POP], [op.PUSH_NULL]),
           []
@@ -599,9 +626,13 @@ function generateBytecode(ast) {
     },
 
     zero_or_more(node, context) {
+      if (!context) {
+        throw new Error('Impossible');
+      }
+
       const expressionCode = generate(node.expression, {
         sp: context.sp + 1,
-        env: cloneEnv(context.env),
+        env: {...context.env},
         action: null,
       });
 
@@ -614,9 +645,13 @@ function generateBytecode(ast) {
     },
 
     one_or_more(node, context) {
+      if (!context) {
+        throw new Error('Impossible');
+      }
+
       const expressionCode = generate(node.expression, {
         sp: context.sp + 1,
-        env: cloneEnv(context.env),
+        env: {...context.env},
         action: null,
       });
 
@@ -625,7 +660,7 @@ function generateBytecode(ast) {
         expressionCode,
         buildCondition(
           // Condition depends on the expression match, not the node match
-          node.expression.match | 0,
+          node.expression.match || MatchResult.SOMETIMES,
           [op.IF_NOT_ERROR],
           buildSequence(buildAppendLoop(expressionCode), [op.POP]),
           buildSequence([op.POP], [op.POP], [op.PUSH_FAILED])
@@ -634,9 +669,13 @@ function generateBytecode(ast) {
     },
 
     group(node, context) {
+      if (!context) {
+        throw new Error('Impossible');
+      }
+
       return generate(node.expression, {
         sp: context.sp,
-        env: cloneEnv(context.env),
+        env: {...context.env},
         action: null,
       });
     },
@@ -650,23 +689,23 @@ function generateBytecode(ast) {
     },
 
     rule_ref(node) {
-      return [op.RULE, asts.indexOfRule(ast, node.name)];
+      return [op.RULE, indexOfRule(ast, node.name)];
     },
 
     literal(node) {
       if (node.value.length > 0) {
-        const match = node.match | 0;
+        const match = node.match || MatchResult.SOMETIMES;
         // String only required if condition is generated or string is
         // case-sensitive and node always match
-        const needConst = match === SOMETIMES_MATCH
-                      || (match === ALWAYS_MATCH && !node.ignoreCase);
+        const needConst = match === MatchResult.SOMETIMES
+                      || (match === MatchResult.ALWAYS && !node.ignoreCase);
         const stringIndex = needConst
           ? addLiteralConst(
             node.ignoreCase ? node.value.toLowerCase() : node.value
           )
           : null;
         // Expectation not required if node always match
-        const expectedIndex = (match !== ALWAYS_MATCH)
+        const expectedIndex = (match !== MatchResult.ALWAYS)
           ? addExpectedConst({
             type: "literal",
             value: node.value,
@@ -693,11 +732,11 @@ function generateBytecode(ast) {
     },
 
     class(node) {
-      const match = node.match | 0;
+      const match = node.match || MatchResult.SOMETIMES;
       // Character class constant only required if condition is generated
-      const classIndex = match === SOMETIMES_MATCH ? addClassConst(node) : null;
+      const classIndex = match === MatchResult.SOMETIMES ? addClassConst(node) : null;
       // Expectation not required if node always match
-      const expectedIndex = (match !== ALWAYS_MATCH)
+      const expectedIndex = (match !== MatchResult.ALWAYS)
         ? addExpectedConst({
           type: "class",
           value: node.parts,
@@ -715,9 +754,9 @@ function generateBytecode(ast) {
     },
 
     any(node) {
-      const match = node.match | 0;
+      const match = node.match || MatchResult.SOMETIMES;
       // Expectation not required if node always match
-      const expectedIndex = (match !== ALWAYS_MATCH)
+      const expectedIndex = (match !== MatchResult.ALWAYS)
         ? addExpectedConst({
           type: "any",
         })
@@ -732,7 +771,5 @@ function generateBytecode(ast) {
     },
   });
 
-  generate(ast);
+  generate(ast, null);
 }
-
-module.exports = generateBytecode;
