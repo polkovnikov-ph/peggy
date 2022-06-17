@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 
-"use strict";
+import { CommanderError, InvalidArgumentError, PeggyCLI } from "./peggy-cli";
 
-const {
-  CommanderError, InvalidArgumentError, PeggyCLI,
-} = require("./peggy-cli.js");
-
-exports.CommanderError = CommanderError;
-exports.InvalidArgumentError = InvalidArgumentError;
-exports.PeggyCLI = PeggyCLI;
+export {
+  CommanderError,
+  InvalidArgumentError,
+  PeggyCLI,
+};
 
 // Jest's coverage can't see into fork'd processes.
 // See: https://github.com/facebook/jest/issues/5274

@@ -1,11 +1,11 @@
-"use strict";
-
-const asts = require("../asts");
-const op = require("../opcodes");
-const Stack = require("../stack");
-const VERSION = require("../../version");
-const { stringEscape, regexpClassEscape } = require("../utils");
-const { SourceNode } = require("source-map-generator");
+import { indexOfRule } from "../asts";
+import { Bytecode, opcodes as op } from "../opcodes";
+import { Stack } from "../stack";
+import VERSION from "../../version";
+import { stringEscape, regexpClassEscape } from "../utils";
+import { SourceNode } from "source-map-generator";
+import type { Pass } from "./pass";
+import type * as a from "../../parser";
 
 /**
  * Converts source text from the grammar into the `source-map` object
@@ -18,7 +18,7 @@ const { SourceNode } = require("source-map-generator");
  * @returns {SourceNode} New node that represents code chunk.
  *          Code will be splitted by lines if necessary
  */
-function toSourceNode(code, location, name) {
+const toSourceNode = (code: string, location: a.LocationRange, name?: string): SourceNode => {
   const line = location.start.line;
   // `source-map` columns are 0-based, peggy columns is 1-based
   const column = location.start.column - 1;
@@ -54,7 +54,13 @@ function toSourceNode(code, location, name) {
  * @returns {SourceNode} New node that represents code chunk.
  *          Code will be splitted by lines if necessary
  */
-function wrapInSourceNode(prefix, chunk, location, suffix, name) {
+const wrapInSourceNode = (
+  prefix: string,
+  chunk: string,
+  location: a.LocationRange,
+  suffix: string,
+  name?: string,
+): SourceNode => {
   // If location is not defined (for example, AST node was replaced
   // by a plugin and does not provide location information, see
   // plugin-api.spec.js/"can replace parser") returns original chunk
@@ -78,28 +84,30 @@ function wrapInSourceNode(prefix, chunk, location, suffix, name) {
 }
 
 // Generates parser JavaScript code.
-function generateJS(ast, options) {
+export const generateJS: Pass = (ast, options) => {
+  const {literals, classes, expectations, functions} = ast;
+  if (!literals || !classes || !expectations || !functions) {
+    throw new Error("Impossible");
+  }
+  
   // These only indent non-empty lines to avoid trailing whitespace.
-  function indent2(code) {
-    return code instanceof SourceNode
+  const indent2 = (code: string | SourceNode) =>
+    code instanceof SourceNode
       ? code
       : code.replace(/^(.+)$/gm, "  $1");
-  }
 
-  function l(i) { return "peg$c" + i; } // |literals[i]| of the abstract machine
-  function r(i) { return "peg$r" + i; } // |classes[i]| of the abstract machine
-  function e(i) { return "peg$e" + i; } // |expectations[i]| of the abstract machine
-  function f(i) { return "peg$f" + i; } // |actions[i]| of the abstract machine
+  const l = (i: number) => "peg$c" + i; // |literals[i]| of the abstract machine
+  const r = (i: number) => "peg$r" + i; // |classes[i]| of the abstract machine
+  const e = (i: number) => "peg$e" + i; // |expectations[i]| of the abstract machine
+  const f = (i: number) => "peg$f" + i; // |actions[i]| of the abstract machine
 
   /** Generates name of the function that parses specified rule. */
-  function name(name) { return "peg$parse" + name; }
+  const name = (name: string) => "peg$parse" + name;
 
-  function generateTables() {
-    function buildLiteral(literal) {
-      return "\"" + stringEscape(literal) + "\"";
-    }
+  const generateTables = () => {
+    const buildLiteral = (literal: string) => "\"" + stringEscape(literal) + "\"";
 
-    function buildRegexp(cls) {
+    const buildRegexp = (cls: a.bytecodeDone.CharClassDesc): string => {
       return "/^["
         + (cls.inverted ? "^" : "")
         + cls.value.map(part => Array.isArray(part)
@@ -110,7 +118,7 @@ function generateJS(ast, options) {
         + "]/" + (cls.ignoreCase ? "i" : "");
     }
 
-    function buildExpectation(e) {
+    const buildExpectation = (e: a.bytecodeDone.ExpectedConst): string => {
       switch (e.type) {
         case "rule": {
           return "peg$otherExpectation(\"" + stringEscape(e.value) + "\")";
@@ -139,7 +147,7 @@ function generateJS(ast, options) {
       }
     }
 
-    function buildFunc(a, i) {
+    const buildFunc = (a: a.bytecodeDone.FunctionDesc, i: number) => {
       return wrapInSourceNode(
         `\n  var ${f(i)} = function(${a.params.join(", ")}) {`,
         a.body,
@@ -150,20 +158,20 @@ function generateJS(ast, options) {
 
     return new SourceNode(
       null, null, options.grammarSource, [
-        ast.literals.map(
+        literals.map(
           (c, i) => "  var " + l(i) + " = " + buildLiteral(c) + ";"
-        ).concat("", ast.classes.map(
+        ).concat("", classes.map(
           (c, i) => "  var " + r(i) + " = " + buildRegexp(c) + ";"
-        )).concat("", ast.expectations.map(
+        )).concat("", expectations.map(
           (c, i) => "  var " + e(i) + " = " + buildExpectation(c) + ";"
         )).concat("").join("\n"),
-        ast.functions.map(buildFunc),
+        functions.map(fn => buildFunc(fn)),
       ]
     );
   }
 
-  function generateRuleHeader(ruleNameCode, ruleIndexCode) {
-    const parts = [];
+  const generateRuleHeader = (ruleNameCode: string, ruleIndexCode: number) {
+    const parts: string[] = [];
 
     parts.push("");
 
@@ -218,7 +226,7 @@ function generateJS(ast, options) {
     return parts;
   }
 
-  function generateRuleFooter(ruleNameCode, resultCode) {
+  const generateRuleFooter = (ruleNameCode: string, resultCode: string) => {
     const parts = [];
 
     if (options.cache) {
@@ -254,23 +262,27 @@ function generateJS(ast, options) {
     );
 
     return parts;
-  }
+  };
 
-  function generateRuleFunction(rule) {
+  const generateRuleFunction = (rule: a.Rule) => {
+    if (!rule.bytecode) {
+      throw new Error("Impossible");
+    }
+
     const parts = [];
     const stack = new Stack(rule.name, "s", "var", rule.bytecode);
 
-    function compile(bc) {
+    const compile = (bc: Bytecode) => {
       let ip = 0;
       const end = bc.length;
       const parts = [];
       let value;
 
-      function compileCondition(cond, argCount) {
+      const compileCondition = (cond: string, argCount: number) => {
         const baseLength = argCount + 3;
         const thenLength = bc[ip + baseLength - 2];
         const elseLength = bc[ip + baseLength - 1];
-        let thenCode, elseCode;
+        let thenCode: undefined | string[], elseCode: undefined | string[];
 
         stack.checkedIf(
           ip,
@@ -284,8 +296,12 @@ function generateJS(ast, options) {
                 elseCode = compile(bc.slice(ip, ip + elseLength));
                 ip += elseLength;
               }
-            : null
+            : undefined
         );
+
+        if (!thenCode || !elseCode) {
+          throw new Error("Impossible");
+        }
 
         parts.push("if (" + cond + ") {");
         parts.push(...thenCode.map(indent2));
@@ -296,10 +312,10 @@ function generateJS(ast, options) {
         parts.push("}");
       }
 
-      function compileLoop(cond) {
+      const compileLoop = (cond: string) => {
         const baseLength = 2;
         const bodyLength = bc[ip + baseLength - 1];
-        let bodyCode;
+        let bodyCode: undefined | string[];
 
         stack.checkedLoop(ip, () => {
           ip += baseLength;
@@ -307,12 +323,16 @@ function generateJS(ast, options) {
           ip += bodyLength;
         });
 
+        if (!bodyCode) {
+          throw new Error("Impossible");
+        }
+
         parts.push("while (" + cond + ") {");
         parts.push(...bodyCode.map(indent2));
         parts.push("}");
       }
 
-      function compileCall() {
+      const compileCall = () => {
         const baseLength = 4;
         const paramsLength = bc[ip + baseLength - 1];
 
@@ -388,7 +408,6 @@ function generateJS(ast, options) {
 
           case op.WRAP:               // WRAP n
             parts.push(
-              // @ts-expect-error  pop() returns array if argument is specified
               stack.push("[" + stack.pop(bc[ip + 1]).join(", ") + "]")
             );
             ip += 2;
@@ -439,21 +458,21 @@ function generateJS(ast, options) {
 
           case op.MATCH_STRING:       // MATCH_STRING s, a, f, ...
             compileCondition(
-              ast.literals[bc[ip + 1]].length > 1
+              literals[bc[ip + 1]].length > 1
                 ? "input.substr(peg$currPos, "
-                    + ast.literals[bc[ip + 1]].length
+                    + literals[bc[ip + 1]].length
                     + ") === "
                     + l(bc[ip + 1])
                 : "input.charCodeAt(peg$currPos) === "
-                    + ast.literals[bc[ip + 1]].charCodeAt(0),
+                    + literals[bc[ip + 1]].charCodeAt(0),
               1
             );
             break;
 
-          case op.MATCH_STRING_IC:    // MATCH_STRING_IC s, a, f, ...
+          case op.MATCH_STRING_IC:   // MATCH_STRING_IC s, a, f, ...
             compileCondition(
               "input.substr(peg$currPos, "
-                + ast.literals[bc[ip + 1]].length
+                + literals[bc[ip + 1]].length
                 + ").toLowerCase() === "
                 + l(bc[ip + 1]),
               1
@@ -481,16 +500,16 @@ function generateJS(ast, options) {
             ip += 2;
             break;
 
-          case op.ACCEPT_STRING:      // ACCEPT_STRING s
+          case op.ACCEPT_STRING: {     // ACCEPT_STRING s
             parts.push(stack.push(l(bc[ip + 1])));
             parts.push(
-              ast.literals[bc[ip + 1]].length > 1
-                ? "peg$currPos += " + ast.literals[bc[ip + 1]].length + ";"
+              literals[bc[ip + 1]].length > 1
+                ? "peg$currPos += " + literals[bc[ip + 1]].length + ";"
                 : "peg$currPos++;"
             );
             ip += 2;
             break;
-
+          }
           case op.FAIL:               // FAIL e
             parts.push(stack.push("peg$FAILED"));
             parts.push("if (peg$silentFails === 0) { peg$fail(" + e(bc[ip + 1]) + "); }");
@@ -553,7 +572,7 @@ function generateJS(ast, options) {
 
     parts.push(...generateRuleHeader(
       "\"" + stringEscape(rule.name) + "\"",
-      asts.indexOfRule(ast, rule.name)
+      indexOfRule(ast, rule.name)
     ).map(indent2));
     parts.push(...code.map(indent2));
     parts.push(...generateRuleFooter(
@@ -566,7 +585,7 @@ function generateJS(ast, options) {
     return parts;
   }
 
-  function ast2SourceNode(node) {
+  const ast2SourceNode = (node: a.Initializer | a.TopLevelInitializer) => {
     // If location is not defined (for example, AST node was replaced
     // by a plugin and does not provide location information, see
     // plugin-api.spec.js/"can replace parser") returns initializer code
@@ -579,7 +598,7 @@ function generateJS(ast, options) {
     return node.code;
   }
 
-  function generateToplevel() {
+  const generateToplevel = () => {
     const parts = [];
 
     if (ast.topLevelInitializer) {
@@ -1040,35 +1059,31 @@ function generateJS(ast, options) {
     );
   }
 
-  function generateWrapper(toplevelCode) {
-    function generateGeneratedByComment() {
-      return [
-        `// Generated by Peggy ${VERSION}.`,
-        "//",
-        "// https://peggyjs.org/",
-      ];
-    }
+  const generateWrapper = (toplevelCode: SourceNode) => {
+    const generateGeneratedByComment = () => [
+      `// Generated by Peggy ${VERSION}.`,
+      "//",
+      "// https://peggyjs.org/",
+    ];
 
-    function generateParserObject() {
-      return options.trace
-        ? [
-            "{",
-            "  SyntaxError: peg$SyntaxError,",
-            "  DefaultTracer: peg$DefaultTracer,",
-            "  parse: peg$parse",
-            "}",
-          ].join("\n")
-        : [
-            "{",
-            "  SyntaxError: peg$SyntaxError,",
-            "  parse: peg$parse",
-            "}",
-          ].join("\n");
-    }
+    const generateParserObject = () => options.trace
+      ? [
+          "{",
+          "  SyntaxError: peg$SyntaxError,",
+          "  DefaultTracer: peg$DefaultTracer,",
+          "  parse: peg$parse",
+          "}",
+        ].join("\n")
+      : [
+          "{",
+          "  SyntaxError: peg$SyntaxError,",
+          "  parse: peg$parse",
+          "}",
+        ].join("\n");
 
-    const generators = {
-      bare() {
-        return [
+    const parts = (() => {
+      switch (options.format) {
+        case "bare": return [
           ...generateGeneratedByComment(),
           "(function() {",
           "  \"use strict\";",
@@ -1078,150 +1093,148 @@ function generateJS(ast, options) {
           indent2("return " + generateParserObject() + ";"),
           "})()",
         ];
-      },
-
-      commonjs() {
-        const dependencyVars = Object.keys(options.dependencies);
-
-        const parts = generateGeneratedByComment();
-        parts.push(
-          "",
-          "\"use strict\";",
-          ""
-        );
-
-        if (dependencyVars.length > 0) {
-          dependencyVars.forEach(variable => {
-            parts.push(
-              "var " + variable
-              + " = require(\""
-              + stringEscape(options.dependencies[variable])
-              + "\");"
-            );
-          });
-          parts.push("");
-        }
-
-        parts.push(
-          toplevelCode,
-          "",
-          "module.exports = " + generateParserObject() + ";"
-        );
-
-        return parts;
-      },
-
-      es() {
-        const dependencyVars = Object.keys(options.dependencies);
-
-        const parts = generateGeneratedByComment();
-        parts.push("");
-
-        if (dependencyVars.length > 0) {
-          dependencyVars.forEach(variable => {
-            parts.push(
-              "import " + variable
-              + " from \""
-              + stringEscape(options.dependencies[variable])
-              + "\";"
-            );
-          });
-          parts.push("");
-        }
-
-        parts.push(
-          toplevelCode,
-          "",
-          "export {",
-          "  peg$SyntaxError as SyntaxError,",
-          options.trace ? "  peg$DefaultTracer as DefaultTracer," : "",
-          "  peg$parse as parse",
-          "};"
-        );
-
-        return parts;
-      },
-
-      amd() {
-        const dependencyVars = Object.keys(options.dependencies);
-        const dependencyIds = dependencyVars.map(v => options.dependencies[v]);
-        const dependencies = "["
-          + dependencyIds.map(
-            id => "\"" + stringEscape(id) + "\""
-          ).join(", ")
-          + "]";
-        const params = dependencyVars.join(", ");
-
-        return [
-          ...generateGeneratedByComment(),
-          "define(" + dependencies + ", function(" + params + ") {",
-          "  \"use strict\";",
-          "",
-          toplevelCode,
-          "",
-          indent2("return " + generateParserObject() + ";"),
-          "});",
-        ];
-      },
-
-      globals() {
-        return [
-          ...generateGeneratedByComment(),
-          "(function(root) {",
-          "  \"use strict\";",
-          "",
-          toplevelCode,
-          "",
-          indent2("root." + options.exportVar + " = " + generateParserObject() + ";"),
-          "})(this);",
-        ];
-      },
-
-      umd() {
-        const dependencyVars = Object.keys(options.dependencies);
-        const dependencyIds = dependencyVars.map(v => options.dependencies[v]);
-        const dependencies = "["
-          + dependencyIds.map(
-            id => "\"" + stringEscape(id) + "\""
-          ).join(", ")
-          + "]";
-        const requires = dependencyIds.map(
-          id => "require(\"" + stringEscape(id) + "\")"
-        ).join(", ");
-        const params = dependencyVars.join(", ");
-
-        const parts = generateGeneratedByComment();
-        parts.push(
-          "(function(root, factory) {",
-          "  if (typeof define === \"function\" && define.amd) {",
-          "    define(" + dependencies + ", factory);",
-          "  } else if (typeof module === \"object\" && module.exports) {",
-          "    module.exports = factory(" + requires + ");"
-        );
-
-        if (options.exportVar !== null) {
+  
+        case "commonjs": {
+          const dependencyVars = Object.keys(options.dependencies);
+  
+          const parts = generateGeneratedByComment();
           parts.push(
-            "  } else {",
-            "    root." + options.exportVar + " = factory();"
+            "",
+            "\"use strict\";",
+            ""
           );
+  
+          if (dependencyVars.length > 0) {
+            dependencyVars.forEach(variable => {
+              parts.push(
+                "var " + variable
+                + " = require(\""
+                + stringEscape(options.dependencies[variable])
+                + "\");"
+              );
+            });
+            parts.push("");
+          }
+  
+          parts.push(
+            toplevelCode,
+            "",
+            "module.exports = " + generateParserObject() + ";"
+          );
+  
+          return parts;
         }
-
-        parts.push(
-          "  }",
-          "})(this, function(" + params + ") {",
-          "  \"use strict\";",
-          "",
-          toplevelCode,
-          "",
-          indent2("return " + generateParserObject() + ";"),
-          "});"
-        );
-
-        return parts;
-      },
-    };
-
-    const parts = generators[options.format]();
+  
+        case "es": {
+          const dependencyVars = Object.keys(options.dependencies);
+  
+          const parts = generateGeneratedByComment();
+          parts.push("");
+  
+          if (dependencyVars.length > 0) {
+            dependencyVars.forEach(variable => {
+              parts.push(
+                "import " + variable
+                + " from \""
+                + stringEscape(options.dependencies[variable])
+                + "\";"
+              );
+            });
+            parts.push("");
+          }
+  
+          parts.push(
+            toplevelCode,
+            "",
+            "export {",
+            "  peg$SyntaxError as SyntaxError,",
+            options.trace ? "  peg$DefaultTracer as DefaultTracer," : "",
+            "  peg$parse as parse",
+            "};"
+          );
+  
+          return parts;
+        }
+  
+        case "amd": {
+          const dependencyVars = Object.keys(options.dependencies);
+          const dependencyIds = dependencyVars.map(v => options.dependencies[v]);
+          const dependencies = "["
+            + dependencyIds.map(
+              id => "\"" + stringEscape(id) + "\""
+            ).join(", ")
+            + "]";
+          const params = dependencyVars.join(", ");
+  
+          return [
+            ...generateGeneratedByComment(),
+            "define(" + dependencies + ", function(" + params + ") {",
+            "  \"use strict\";",
+            "",
+            toplevelCode,
+            "",
+            indent2("return " + generateParserObject() + ";"),
+            "});",
+          ];
+        }
+  
+        case "globals": {
+          return [
+            ...generateGeneratedByComment(),
+            "(function(root) {",
+            "  \"use strict\";",
+            "",
+            toplevelCode,
+            "",
+            indent2("root." + options.exportVar + " = " + generateParserObject() + ";"),
+            "})(this);",
+          ];
+        }
+  
+        case "umd": {
+          const dependencyVars = Object.keys(options.dependencies);
+          const dependencyIds = dependencyVars.map(v => options.dependencies[v]);
+          const dependencies = "["
+            + dependencyIds.map(
+              id => "\"" + stringEscape(id) + "\""
+            ).join(", ")
+            + "]";
+          const requires = dependencyIds.map(
+            id => "require(\"" + stringEscape(id) + "\")"
+          ).join(", ");
+          const params = dependencyVars.join(", ");
+  
+          const parts = generateGeneratedByComment();
+          parts.push(
+            "(function(root, factory) {",
+            "  if (typeof define === \"function\" && define.amd) {",
+            "    define(" + dependencies + ", factory);",
+            "  } else if (typeof module === \"object\" && module.exports) {",
+            "    module.exports = factory(" + requires + ");"
+          );
+  
+          if (options.exportVar !== null) {
+            parts.push(
+              "  } else {",
+              "    root." + options.exportVar + " = factory();"
+            );
+          }
+  
+          parts.push(
+            "  }",
+            "})(this, function(" + params + ") {",
+            "  \"use strict\";",
+            "",
+            toplevelCode,
+            "",
+            indent2("return " + generateParserObject() + ";"),
+            "});"
+          );
+  
+          return parts;
+        }
+      }
+    })();
 
     return new SourceNode(
       // This expression has a better readability when on two lines
@@ -1233,5 +1246,3 @@ function generateJS(ast, options) {
 
   ast.code = generateWrapper(generateToplevel());
 }
-
-module.exports = generateJS;

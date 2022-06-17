@@ -1,7 +1,7 @@
-"use strict";
-
-const asts = require("../asts");
-const visitor = require("../visitor");
+import { RuleReference } from "../../parser";
+import { alwaysConsumesOnSuccess, findRule } from "../asts";
+import { buildVisitor } from "../visitor";
+import type { Pass } from "./pass";
 
 // Reports left recursion in the grammar, which prevents infinite recursion in
 // the generated parser.
@@ -13,13 +13,13 @@ const visitor = require("../visitor");
 //
 // In general, if a rule reference can be reached without consuming any input,
 // it can lead to left recursion.
-function reportInfiniteRecursion(ast, options, session) {
+export const reportInfiniteRecursion: Pass = (ast, options, session) => {
   // Array with rule names for error message
-  const visitedRules = [];
+  const visitedRules: string[] = [];
   // Array with rule_refs for diagnostic
-  const backtraceRefs = [];
+  const backtraceRefs: RuleReference[] = [];
 
-  const check = visitor.build({
+  const check = buildVisitor({
     rule(node) {
       visitedRules.push(node.name);
       check(node.expression);
@@ -27,17 +27,22 @@ function reportInfiniteRecursion(ast, options, session) {
     },
 
     sequence(node) {
-      node.elements.every(element => {
+      for (const element of node.elements) {
         check(element);
 
-        return !asts.alwaysConsumesOnSuccess(ast, element);
-      });
+        if (alwaysConsumesOnSuccess(ast, element)) {
+          break;
+        }
+      }
     },
 
     rule_ref(node) {
       backtraceRefs.push(node);
 
-      const rule = asts.findRule(ast, node.name);
+      const rule = findRule(ast, node.name);
+      if (!rule) {
+        throw new Error(`Could not find rule ${node.name} while looking for infinite recursive parsers`);
+      }
 
       if (visitedRules.indexOf(node.name) !== -1) {
         visitedRules.push(node.name);
@@ -70,5 +75,3 @@ function reportInfiniteRecursion(ast, options, session) {
 
   check(ast);
 }
-
-module.exports = reportInfiniteRecursion;

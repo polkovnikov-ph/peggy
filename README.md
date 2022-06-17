@@ -57,6 +57,9 @@ Peggy was originally developed by [David Majda](https://majda.cz/)
 ([@dmajda](http://twitter.com/dmajda)). It is currently maintained by
 [Joe Hildebrand](https://github.com/hildjj) ([@hildjj](https://twitter.com/hildjj)).
 
+Thanks to [@vvakame](https://github.com/vvakame), [Tobias Kahlert](https://github.com/SrTobi) and
+[C.J. Bell](https://github.com/siegebell) for PEG.js type definitions!
+
 You are welcome to contribute code. Unless your contribution is really trivial
 you should [get in touch with us](https://github.com/peggyjs/peggy/discussions)
 first — this can prevent wasted effort on both sides.
